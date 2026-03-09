@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SQL 実行デモ</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>SQL 実行デモ</h1>
+      <div class="meta">注意: 任意SQLを実行できます。公開環境での利用は避けてください。</div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">接続設定</h3>
+        <label>DBタイプ
+          <select id="db_type">
+            <option value="postgres">Postgres</option>
+            <option value="mysql">MySQL</option>
+            <option value="oracle">Oracle</option>
+          </select>
+        </label>
+
+        <div class="row" style="margin-bottom:8px">
+          <div style="flex:1">
+            <label>ホスト <input id="host" type="text" value="localhost"></label>
+          </div>
+          <div style="width:120px">
+            <label>ポート <input id="port" type="text"></label>
+          </div>
+        </div>
+
+        <label>データベース名 <input id="database" type="text"></label>
+        <div class="hint">Oracleの場合はサービス名を入力してください（例: ORCLPDB1）。</div>
+        <div class="row" style="margin-top:8px">
+          <div style="flex:1"><label>ユーザ <input id="user" type="text"></label></div>
+          <div style="width:180px"><label>パスワード <input id="password" type="password"></label></div>
+        </div>
+
+        <h3 style="margin-top:16px">SQL</h3>
+        <textarea id="sql">SELECT 1 AS sample;</textarea>
+        <div class="controls">
+          <button id="exec">実行</button>
+          <div class="meta">結果は右側に表示されます</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">結果</h3>
+        <div id="result" class="result-area"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const dbTypeEl = document.getElementById('db_type');
+      const sqlEl = document.getElementById('sql');
+
+      dbTypeEl.addEventListener('change', () => {
+        const t = dbTypeEl.value;
+        if (t === 'oracle') {
+          if (!sqlEl.value || sqlEl.value.trim() === 'SELECT 1 AS sample;') sqlEl.value = 'SELECT 1 FROM DUAL;';
+        } else {
+          if (sqlEl.value && sqlEl.value.trim() === 'SELECT 1 FROM DUAL;') sqlEl.value = 'SELECT 1 AS sample;';
+        }
+      });
+
+      document.getElementById('exec').addEventListener('click', async () => {
+        const payload = {
+          db_type: dbTypeEl.value,
+          host: document.getElementById('host').value,
+          port: document.getElementById('port').value || undefined,
+          database: document.getElementById('database').value,
+          user: document.getElementById('user').value,
+          password: document.getElementById('password').value,
+          sql: sqlEl.value
+        };
+        const resDiv = document.getElementById('result');
+        resDiv.innerHTML = '<div class="meta">実行中…</div>';
+        try {
+          const r = await fetch('/execute', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+          });
+          const data = await r.json();
+          if (!r.ok) throw data;
+          if (data.error) throw data;
+          if (data.columns) {
+            let html = '<div class="meta">取得件数: ' + data.rows.length + '</div>';
+            html += '<div style="overflow:auto"><table><thead><tr>' + data.columns.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+            for (const row of data.rows) {
+              html += '<tr>' + row.map(v => `<td>${v === null ? '' : escapeHtml(String(v))}</td>`).join('') + '</tr>';
+            }
+            html += '</tbody></table></div>';
+            resDiv.innerHTML = html;
+          } else {
+            resDiv.innerHTML = '<div class="meta">影響行数: ' + (data.rowcount ?? 0) + '</div>';
+          }
+        } catch (err) {
+          resDiv.innerHTML = '<div class="error">' + (err.error || err.message || JSON.stringify(err)) + '</div>';
+        }
+      });
+
+      function escapeHtml(s){
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+    });
+  </script>
+</body>
+</html>

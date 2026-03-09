@@ -1,0 +1,6 @@
+Flask
+flask-cors
+SQLAlchemy
+psycopg2-binary
+mysql-connector-python
+oracledb

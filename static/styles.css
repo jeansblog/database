@@ -1,0 +1,40 @@
+:root{
+  --bg:#f6fafc;
+  --card:#ffffff;
+  --muted:#6b7280;
+  --accent:#2563eb;
+  --accent-2:#06b6d4;
+  --text:#0f1724;
+  --danger:#dc2626;
+  --radius:10px;
+  --glass: rgba(15,23,36,0.03);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;color:var(--text);background:linear-gradient(180deg,#f8fbfd 0%, #edf6fb 60%);min-height:100vh;padding:32px}
+.wrap{max-width:1100px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+header h1{margin:0;font-size:18px}
+.grid{display:grid;grid-template-columns:1fr 520px;gap:20px}
+.card{background:var(--card);padding:18px;border-radius:var(--radius);box-shadow:0 8px 30px rgba(15,23,36,0.06);}
+label{display:block;margin-bottom:8px;color:var(--muted);font-size:13px}
+.row{display:flex;gap:10px}
+input[type=text], input[type=password], select, textarea{width:100%;padding:10px;border-radius:8px;border:1px solid rgba(15,23,36,0.08);background:#ffffff;color:var(--text);outline:none;font-size:14px}
+textarea{min-height:200px;resize:vertical}
+.controls{display:flex;gap:10px;align-items:center;margin-top:12px}
+button#exec{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:none;color:white;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600;box-shadow:0 6px 20px rgba(37,99,235,0.14);border:1px solid rgba(37,99,235,0.12)}
+button#exec:active{transform:translateY(1px)}
+.hint{font-size:12px;color:var(--muted);margin-top:6px}
+.result-area{min-height:160px;overflow:auto}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+th,td{padding:10px;border-bottom:1px solid rgba(15,23,36,0.06);text-align:left}
+thead th{background:rgba(15,23,36,0.03);font-weight:600}
+tbody tr:hover{background:rgba(15,23,36,0.02)}
+.meta{font-size:13px;color:var(--muted)}
+.error{color:var(--danger);background:rgba(220,38,38,0.06);padding:8px;border-radius:6px}
+@media (max-width:980px){.grid{grid-template-columns:1fr;}.wrap{padding:16px}}
+
+/* helper: make the exec button always visible near bottom-left of the card on small screens */
+@media (max-width:560px){
+  .controls{flex-direction:column;align-items:flex-start}
+  button#exec{width:100%}
+}
