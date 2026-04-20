@@ -1,0 +1,18 @@
+# YAML Configuration for LLM Provider Settings
+
+llm:
+  default_provider: "ollama"
+  providers:
+    ollama:
+      base_url: "http://localhost:11434/v1/chat/completions"
+      model: "gemma4:e2b"
+      api_key: null
+      timeout: 30  # seconds
+    vllm:
+      base_url: "http://localhost:8000/v1/chat/completions"
+      model: "gemma4:e2b"
+      api_key: null
+      timeout: 30  # seconds
+
+mcp:
+  url: "http://localhost:8900/mcp"
