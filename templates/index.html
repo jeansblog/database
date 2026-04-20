@@ -39,11 +39,22 @@
           <div style="flex:1"><label>ユーザ <input id="user" type="text"></label></div>
           <div style="width:180px"><label>パスワード <input id="password" type="password"></label></div>
         </div>
+        <div style="margin-top:8px">
+          <label><input type="checkbox" id="save_conn" checked> 接続設定をこのブラウザに保存する（パスワードは保存しません）</label>
+        </div>
+
+        <!-- 開始日/終了日入力を追加 -->
+        <div class="row" style="margin-top:8px">
+          <div style="flex:1"><label>開始日 <input id="s_day" type="datetime-local"></label></div>
+          <div style="width:250px"><label>終了日 <input id="e_day" type="datetime-local"></label></div>
+        </div>
 
         <h3 style="margin-top:16px">SQL</h3>
         <textarea id="sql">SELECT 1 AS sample;</textarea>
+        <div id="variable-controls" class="hint" style="margin-top:8px"></div>
         <div class="controls">
           <button id="exec">実行</button>
+          <button id="download_sql" style="margin-left:8px">SQLダウンロード</button>
           <div class="meta">結果は右側に表示されます</div>
         </div>
       </div>
@@ -57,8 +68,111 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+      const saveConnEl = document.getElementById('save_conn');
       const dbTypeEl = document.getElementById('db_type');
       const sqlEl = document.getElementById('sql');
+      const varControls = document.getElementById('variable-controls');
+      // 日付入力要素（datetime-local）
+      const sDayEl = document.getElementById('s_day');
+      const eDayEl = document.getElementById('e_day');
+      // ダウンロードボタン
+      const downloadBtn = document.getElementById('download_sql');
+
+      // 入力フィールドを datetime-local に変換している場合、value を SQL 用の 'YYYY-MM-DD HH:MM:SS' に整形する
+      function formatDateInput(raw){
+        if (!raw) return '';
+        // datetime-local は 'YYYY-MM-DDTHH:MM' または 'YYYY-MM-DDTHH:MM:SS'
+        let v = String(raw).replace('T',' ');
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(v)) v = v + ':00';
+        // もしミリ秒等が付いていたら切り詰め
+        v = v.replace(/(\.\d+).*$/,'');
+        return v;
+      }
+
+      // s_day / e_day 用に 'YYYY/MM/DD' 形式へ変換する
+      function formatToYMD(raw){
+        if (!raw) return '';
+        const s = String(raw);
+        if (s.indexOf('T') !== -1){
+          return s.split('T')[0].replace(/-/g,'/');
+        }
+        // もし 'YYYY-MM-DD hh:mm:ss' のような形式なら日付部分を抽出してスラッシュ化
+        if (s.indexOf('-') !== -1){
+          return s.split(' ')[0].replace(/-/g,'/');
+        }
+        // 既にスラッシュ区切りならそのまま
+        return s;
+      }
+
+      // SQL を組み立てて返すユーティリティ
+      function buildTransformedSql(){
+        const originalSql = sqlEl.value || '';
+        const vars = extractVariables(originalSql);
+        let transformedSql = originalSql.replace(/:([a-zA-Z_]\w*)/g, '$1');
+        for (const v of vars){
+          const simpleBraceRe = new RegExp('\\{\\{\\s*'+v+'\\s*\\}\}', 'g');
+          // 優先: 同名の input 要素 (例: s_day) を利用
+          let rawVal = '';
+          const inputEl = document.getElementById(v);
+          if (inputEl) rawVal = inputEl.value;
+          // s_day/e_day は専用要素から取得してフォーマット
+          if ((v === 's_day' || v === 'e_day') && (!inputEl || inputEl.type !== 'datetime-local')){
+            rawVal = (v === 's_day' ? sDayEl.value : eDayEl.value) || rawVal;
+          }
+          if (inputEl && inputEl.type === 'datetime-local') rawVal = formatDateInput(rawVal);
+          // s_day/e_day は 'YYYY/MM/DD' 形式にする
+          if ((v === 's_day' || v === 'e_day') && rawVal){ rawVal = formatToYMD(rawVal); }
+          const escVal = String(rawVal).replace(/'/g, "''");
+          transformedSql = transformedSql.replace(simpleBraceRe, escVal);
+        }
+        return {transformedSql, vars};
+      }
+
+       // restore saved connection (excluding password)
+       try {
+         const saved = localStorage.getItem('sql_exec_conn');
+         if (saved) {
+           const obj = JSON.parse(saved);
+           if (obj.db_type) dbTypeEl.value = obj.db_type;
+           if (obj.host) document.getElementById('host').value = obj.host;
+           if (obj.port) document.getElementById('port').value = obj.port;
+           if (obj.database) document.getElementById('database').value = obj.database;
+           if (obj.user) document.getElementById('user').value = obj.user;
+           // 既定では日付は保存しないが、もし保存していれば復元できるようにする
+           if (obj.s_day) sDayEl.value = obj.s_day;
+           if (obj.e_day) eDayEl.value = obj.e_day;
+         }
+       } catch (e) {
+         console.warn('saved conn load failed', e);
+       }
+
+       let currentVars = [];
+
+      function extractVariables(s){
+        // detect both :var and {{var}} styles
+        const colonRe = /:([a-zA-Z_]\w*)/g;
+        const braceRe = /\{\{\s*([a-zA-Z_]\w*)\s*\}\}/g;
+        const set = new Set();
+        let m;
+        while ((m = colonRe.exec(s)) !== null) set.add(m[1]);
+        while ((m = braceRe.exec(s)) !== null) set.add(m[1]);
+        return Array.from(set);
+      }
+
+      function renderVariableControls(){
+        const vars = extractVariables(sqlEl.value || '');
+        currentVars = vars;
+        if (vars.length === 0){
+          varControls.innerHTML = '';
+          return;
+        }
+        // simple listing of detected variable placeholders
+        let html = '<div class="meta">検出された変数: ' + vars.join(', ') + '</div>';
+        html += '<div class="hint">注意: SQL送信時にコロンを取り除いてサーバへ送信します。結果表示では検出された変数名に対応する列を抽出して先頭10行を表示します。</div>';
+        varControls.innerHTML = html;
+      }
+
+      sqlEl.addEventListener('input', renderVariableControls);
 
       dbTypeEl.addEventListener('change', () => {
         const t = dbTypeEl.value;
@@ -67,9 +181,29 @@
         } else {
           if (sqlEl.value && sqlEl.value.trim() === 'SELECT 1 FROM DUAL;') sqlEl.value = 'SELECT 1 AS sample;';
         }
+        renderVariableControls();
       });
 
+      // initial render
+      renderVariableControls();
+
       document.getElementById('exec').addEventListener('click', async () => {
+        const {transformedSql, vars} = buildTransformedSql();
+
+        // save connection (without password) if requested
+        if (saveConnEl && saveConnEl.checked) {
+          try {
+            const toSave = {
+              db_type: dbTypeEl.value,
+              host: document.getElementById('host').value,
+              port: document.getElementById('port').value || undefined,
+              database: document.getElementById('database').value,
+              user: document.getElementById('user').value
+            };
+            localStorage.setItem('sql_exec_conn', JSON.stringify(toSave));
+          } catch (e) { console.warn('保存失敗', e); }
+        }
+
         const payload = {
           db_type: dbTypeEl.value,
           host: document.getElementById('host').value,
@@ -77,8 +211,11 @@
           database: document.getElementById('database').value,
           user: document.getElementById('user').value,
           password: document.getElementById('password').value,
-          sql: sqlEl.value
+          // send transformed SQL and detected variable names soサーバ側が必要なら扱えるようにする
+          sql: transformedSql,
+          variables: vars
         };
+
         const resDiv = document.getElementById('result');
         resDiv.innerHTML = '<div class="meta">実行中…</div>';
         try {
@@ -90,13 +227,37 @@
           const data = await r.json();
           if (!r.ok) throw data;
           if (data.error) throw data;
+
+          // build main result (existing table)
           if (data.columns) {
             let html = '<div class="meta">取得件数: ' + data.rows.length + '</div>';
-            html += '<div style="overflow:auto"><table><thead><tr>' + data.columns.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+            html += '<div style="overflow:auto"><table><thead><tr>' + data.columns.map(c => `<th>${escapeHtml(String(c))}</th>`).join('') + '</tr></thead><tbody>';
             for (const row of data.rows) {
               html += '<tr>' + row.map(v => `<td>${v === null ? '' : escapeHtml(String(v))}</td>`).join('') + '</tr>';
             }
             html += '</tbody></table></div>';
+
+            // if variables were detected, build a variables table using the first up to 10 rows
+            if (vars.length > 0) {
+              const colIdx = vars.map(v => {
+                const lower = v.toLowerCase();
+                return data.columns.findIndex(c => String(c).toLowerCase() === lower);
+              });
+
+              //html += '<h4 style="margin-top:12px">変数表（先頭10行）</h4>';
+              //html += '<div style="overflow:auto"><table><thead><tr>' + vars.map(v => `<th>${escapeHtml(v)}</th>`).join('') + '</tr></thead><tbody>';
+              const maxRows = Math.min(10, data.rows.length);
+              for (let i = 0; i < maxRows; i++){
+                const row = data.rows[i];
+                html += '<tr>' + colIdx.map(idx => {
+                  if (idx === -1) return '<td></td>';
+                  const v = row[idx];
+                  return `<td>${v === null ? '' : escapeHtml(String(v))}</td>`;
+                }).join('') + '</tr>';
+              }
+              html += '</tbody></table></div>';
+            }
+
             resDiv.innerHTML = html;
           } else {
             resDiv.innerHTML = '<div class="meta">影響行数: ' + (data.rowcount ?? 0) + '</div>';
@@ -105,6 +266,32 @@
           resDiv.innerHTML = '<div class="error">' + (err.error || err.message || JSON.stringify(err)) + '</div>';
         }
       });
+
+      // ダウンロードボタンは exec の外で1回登録する
+      if (downloadBtn){
+        downloadBtn.addEventListener('click', () => {
+          // ダウンロード用は {{s_day}} / {{e_day}} をそのまま残す
+          const originalSqlForDownload = sqlEl.value || '';
+          // ただし :var スタイルはコロンを除去しておく
+          const sqlForDownload = originalSqlForDownload.replace(/:([a-zA-Z_]\w*)/g, '$1');
+           const headerLines = [];
+           headerLines.push('-- DB_TYPE: ' + (dbTypeEl.value || ''));
+           headerLines.push('-- HOST: ' + (document.getElementById('host').value || ''));
+           headerLines.push('-- PORT: ' + (document.getElementById('port').value || ''));
+           headerLines.push('-- DATABASE: ' + (document.getElementById('database').value || ''));
+           headerLines.push('-- USER: ' + (document.getElementById('user').value || ''));
+           headerLines.push('');
+           const blob = new Blob([headerLines.join('\n') + sqlForDownload], {type: 'text/sql;charset=utf-8'});
+           const url = URL.createObjectURL(blob);
+           const a = document.createElement('a');
+           a.href = url;
+           const ts = new Date().toISOString().replace(/[:\.]/g,'-');
+           a.download = 'query-' + ts + '.sql';
+           document.body.appendChild(a);
+           a.click();
+           setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 1000);
+         });
+       }
 
       function escapeHtml(s){
         return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
