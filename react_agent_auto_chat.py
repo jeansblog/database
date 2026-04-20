@@ -1,12 +1,9 @@
 import httpx
 import json
+import argparse
+from pathlib import Path
 
-# =========================
-# 設定
-# =========================
-MCP_URL = "http://localhost:8900/mcp"
-OLLAMA_URL = "http://localhost:11434/v1/chat/completions"
-MODEL = "gemma4:e2b"
+import yaml
 
 # =========================
 # system prompt（ツール辞書生成）
@@ -43,40 +40,89 @@ inputSchema を元に、ユーザー入力から引数を抽出してくださ�
 """
 
 # =========================
+# 設定ロード
+# =========================
+DEFAULT_CONFIG = {
+    "mcp": {"url": "http://localhost:8900/mcp"},
+    "llm": {
+        "provider": "ollama",
+        "timeout": 120,
+        "temperature": 0,
+        "stream": False,
+        "providers": {
+            "ollama": {
+                "base_url": "http://localhost:11434/v1/chat/completions",
+                "model": "gemma4:e2b",
+                "api_key": None,
+            },
+            "vllm": {
+                "base_url": "http://localhost:8000/v1/chat/completions",
+                "model": "your-model-name",
+                "api_key": None,
+            },
+        },
+    },
+}
+
+
+def deep_merge(dst, src):
+    for k, v in (src or {}).items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            deep_merge(dst[k], v)
+        else:
+            dst[k] = v
+    return dst
+
+
+def load_config(path: str):
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    p = Path(path)
+    if p.exists():
+        loaded = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        deep_merge(cfg, loaded)
+    return cfg
+
+# =========================
 # JSON-RPC helper
 # =========================
 def rpc(method, params=None, id=1):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-    }
+    payload = {"jsonrpc": "2.0", "id": id, "method": method}
     if params is not None:
         payload["params"] = params
     return payload
 
 # =========================
-# Ollama 呼び出し
+# LLM 呼び出し（Ollama / vLLM 共通）
 # =========================
-def ask_ollama(messages):
+def ask_llm(messages, *, provider_cfg, timeout, temperature=0, stream=False):
+    url = provider_cfg["base_url"]
+    model = provider_cfg["model"]
+    api_key = provider_cfg.get("api_key")
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     r = httpx.post(
-        OLLAMA_URL,
+        url,
+        headers=headers,
         json={
-            "model": MODEL,
+            "model": model,
             "messages": messages,
-            "temperature": 0,
-            "stream": False,
+            "temperature": temperature,
+            "stream": stream,
         },
-        timeout=120,
+        timeout=timeout,
     )
+    r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
 # =========================
 # MCP tools/list 取得
 # =========================
-def get_tools_list(client, headers):
+def get_tools_list(client, headers, mcp_url):
     res = client.post(
-        MCP_URL,
+        mcp_url,
         headers=headers,
         json=rpc("tools/list"),
         timeout=30,
@@ -95,13 +141,10 @@ def get_tools_list(client, headers):
 # =========================
 # ツール辞書生成
 # =========================
-def build_tool_intent_dict(tools):
-    tools_info = [
-        {"name": t["name"], "description": t.get("description", "")}
-        for t in tools
-    ]
+def build_tool_intent_dict(tools, ask_fn):
+    tools_info = [{"name": t["name"], "description": t.get("description", "") } for t in tools]
 
-    raw = ask_ollama(
+    raw = ask_fn(
         [
             {"role": "system", "content": TOOL_DICT_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(tools_info, ensure_ascii=False)},
@@ -109,7 +152,7 @@ def build_tool_intent_dict(tools):
     ).strip()
 
     if raw.startswith("```"):
-        raw = raw.split("```")[1].strip()
+        raw = raw.split("```", 2)[1].strip()
         if raw.startswith("json"):
             raw = raw[4:].strip()
 
@@ -135,22 +178,26 @@ def build_valid_intents(tool_intent_dict):
 # =========================
 # intent 分類
 # =========================
-def classify_intent(user_input, valid_intents):
+def classify_intent(user_input, valid_intents, ask_fn):
     intent_list = "\n".join(f"- {i}" for i in sorted(valid_intents))
-    return ask_ollama(
-        [
-            {
-                "role": "system",
-                "content": (
-                    "次のユーザ入力を intent に分類してください。\n\n"
-                    "使える intent:\n"
-                    f"{intent_list}\n\n"
-                    "出力は intent のみ。"
-                ),
-            },
-            {"role": "user", "content": user_input},
-        ]
-    ).strip().lower()
+    return (
+        ask_fn(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "次のユーザ入力を intent に分類してください。\n\n"
+                        "使える intent:\n"
+                        f"{intent_list}\n\n"
+                        "出力は intent のみ。"
+                    ),
+                },
+                {"role": "user", "content": user_input},
+            ]
+        )
+        .strip()
+        .lower()
+    )
 
 # =========================
 # tool 選択
@@ -164,12 +211,12 @@ def select_tool(intent, tool_intent_dict):
 # =========================
 # 引数抽出
 # =========================
-def extract_tool_arguments(user_input, tool):
+def extract_tool_arguments(user_input, tool, ask_fn):
     schema = tool.get("inputSchema")
     if not schema:
         return {}
 
-    raw = ask_ollama(
+    raw = ask_fn(
         [
             {"role": "system", "content": ARG_EXTRACT_SYSTEM_PROMPT},
             {
@@ -187,7 +234,7 @@ def extract_tool_arguments(user_input, tool):
     ).strip()
 
     if raw.startswith("```"):
-        raw = raw.split("```")[1].strip()
+        raw = raw.split("```", 2)[1].strip()
         if raw.startswith("json"):
             raw = raw[4:].strip()
 
@@ -200,89 +247,110 @@ def missing_required_args(tool, args):
     required = tool.get("inputSchema", {}).get("required", [])
     return [k for k in required if k not in args or args[k] is None]
 
-# =========================
-# メイン
-# =========================
-with httpx.Client() as client:
-    # initialize（Accept ヘッダ必須）
-    init = client.post(
-        MCP_URL,
-        headers={
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.yaml", help="Path to YAML config (default: config.yaml)")
+    parser.add_argument("--provider", default=None, help="Override provider (ollama|vllm)")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+
+    mcp_url = cfg["mcp"]["url"]
+    llm_cfg = cfg["llm"]
+    provider_name = args.provider or llm_cfg["provider"]
+    provider_cfg = llm_cfg["providers"][provider_name]
+
+    timeout = llm_cfg.get("timeout", 120)
+    temperature = llm_cfg.get("temperature", 0)
+    stream = llm_cfg.get("stream", False)
+
+    def ask_fn(messages):
+        return ask_llm(
+            messages,
+            provider_cfg=provider_cfg,
+            timeout=timeout,
+            temperature=temperature,
+            stream=stream,
+        )
+
+    with httpx.Client() as client:
+        init = client.post(
+            mcp_url,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            json=rpc(
+                "initialize",
+                {
+                    "protocolVersion": "1.0",
+                    "capabilities": {},
+                    "clientInfo": {"name": "react-agent-chat", "version": "1.0"},
+                },
+            ),
+        )
+
+        session_id = init.headers["mcp-session-id"]
+
+        headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
-        },
-        json=rpc(
-            "initialize",
-            {
-                "protocolVersion": "1.0",
-                "capabilities": {},
-                "clientInfo": {"name": "react-agent-chat", "version": "1.0"},
-            },
-        ),
-    )
+            "mcp-session-id": session_id,
+        }
 
-    session_id = init.headers["mcp-session-id"]
-
-    # ★ ここで headers を 1 回だけ作る（最重要）
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        "mcp-session-id": session_id,
-    }
-
-    # initialized 通知
-    client.post(
-        MCP_URL,
-        headers=headers,
-        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
-    )
-
-    # 初期化処理
-    tools = get_tools_list(client, headers)
-    tool_intent_dict = build_tool_intent_dict(tools)
-    valid_intents = build_valid_intents(tool_intent_dict)
-
-    print("[INFO] tool_intent_dict =", tool_intent_dict)
-    print("MCP ReAct Agent (type 'exit' to quit)")
-
-    # CLI ループ
-    while True:
-        user_input = input("> ").strip()
-        if user_input.lower() in ("exit", "quit"):
-            break
-
-        intent = classify_intent(user_input, valid_intents)
-        tool_name = select_tool(intent, tool_intent_dict)
-
-        if tool_name:
-            tool = next(t for t in tools if t["name"] == tool_name)
-            args = extract_tool_arguments(user_input, tool)
-
-            missing = missing_required_args(tool, args)
-            if missing:
-                print(f"{missing[0]}を教えてください。")
-                continue
-
-            result = client.post(
-                MCP_URL,
-                headers=headers,
-                json=rpc(
-                    "tools/call",
-                    {"name": tool_name, "arguments": args},
-                ),
-            ).json()
-
-            observation = result["result"]["content"][0]["text"]
-        else:
-            observation = user_input
-
-        response = ask_ollama(
-            [
-                {
-                    "role": "system",
-                    "content": "以下を自然な日本語で答えてください。",
-                },
-                {"role": "user", "content": observation},
-            ]
+        client.post(
+            mcp_url,
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
         )
-        print(response)
+
+        tools = get_tools_list(client, headers, mcp_url)
+        tool_intent_dict = build_tool_intent_dict(tools, ask_fn)
+        valid_intents = build_valid_intents(tool_intent_dict)
+
+        print("[INFO] provider =", provider_name)
+        print("[INFO] model =", provider_cfg["model"])
+        print("[INFO] tool_intent_dict =", tool_intent_dict)
+        print("MCP ReAct Agent (type 'exit' to quit)")
+
+        while True:
+            user_input = input("> ").strip()
+            if user_input.lower() in ("exit", "quit"):
+                break
+
+            intent = classify_intent(user_input, valid_intents, ask_fn)
+            tool_name = select_tool(intent, tool_intent_dict)
+
+            if tool_name:
+                tool = next(t for t in tools if t["name"] == tool_name)
+                args2 = extract_tool_arguments(user_input, tool, ask_fn)
+
+                missing = missing_required_args(tool, args2)
+                if missing:
+                    print(f"{missing[0]}を教えてください。")
+                    continue
+
+                result = client.post(
+                    mcp_url,
+                    headers=headers,
+                    json=rpc(
+                        "tools/call",
+                        {"name": tool_name, "arguments": args2},
+                    ),
+                ).json()
+
+                observation = result["result"]["content"][0]["text"]
+            else:
+                observation = user_input
+
+            response = ask_fn(
+                [
+                    {"role": "system", "content": "以下を自然な日本語で答えてください。"},
+                    {"role": "user", "content": observation},
+                ]
+            )
+            print(response)
+
+
+if __name__ == "__main__":
+    main()
